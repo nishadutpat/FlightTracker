@@ -1,5 +1,5 @@
-// App.jsx – Flight Tracker (Rotating Planes + Route + Filters)
-import { useState, useEffect, useMemo } from "react";
+// App.jsx – Flight Tracker (Rotating Planes + Route Display)
+import { useState, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
 import L from "leaflet";
 import React from "react";
@@ -13,8 +13,8 @@ L.Icon.Default.mergeOptions({
   shadowUrl: "",
 });
 
-/* --- Inline SVG Plane Icon --- */
-const createPlaneIcon = (heading = 0, selected = false, color = "#38bdf8") =>
+/* --- Inline SVG Plane Icon (NO EXTERNAL FILES) --- */
+const createPlaneIcon = (heading = 0, selected = false) =>
   L.divIcon({
     className: "plane-icon",
     html: `
@@ -23,10 +23,10 @@ const createPlaneIcon = (heading = 0, selected = false, color = "#38bdf8") =>
         height: 36px;
         transform: rotate(${heading}deg);
         transition: transform 0.5s ease;
-        filter: ${selected ? "drop-shadow(0 0 10px " + color + ")" : "none"};
+        filter: ${selected ? "drop-shadow(0 0 10px #38bdf8)" : "none"};
         pointer-events: none;
       ">
-        <svg viewBox="0 0 24 24" width="36" height="36" fill="${color}">
+        <svg viewBox="0 0 24 24" width="36" height="36" fill="#38bdf8">
           <path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9L2 14v2l8-1v4l-2 1.5V22l3-1 3 1v-1.5L13 19v-4l8 1z"/>
         </svg>
       </div>
@@ -39,26 +39,20 @@ const createPlaneIcon = (heading = 0, selected = false, color = "#38bdf8") =>
 const INDIA_BOUNDS = { latMin: 6, latMax: 38, lonMin: 68, lonMax: 97 };
 const MAX_PLANES = 200;
 
-/* --- Minimal Airport Coordinate Map (can expand later) --- */
-const AIRPORTS = {
-  VABB: [19.0896, 72.8656],
-  VIDP: [28.5562, 77.1000],
-  VOBL: [13.1986, 77.7066],
-  VOHS: [17.2403, 78.4294],
-  VOMM: [12.9941, 80.1709],
-};
-
 /* --- Helpers --- */
 const normalizeVelocity = (v) => {
+  if (v == null) return null;
   const n = Number(v);
-  if (!n || isNaN(n)) return null;
-  return n > 100 ? n * 0.514444 : n;
+  if (isNaN(n)) return null;
+  if (n > 1000) return n;
+  if (n > 100) return n * 0.514444;
+  return n;
 };
 
-const movePlane = (lat, lon, heading, velocity_mps) => {
-  if (!lat || !lon || !velocity_mps) return [lat, lon];
+const movePlane = (lat, lon, heading, velocity_mps, interval = 1) => {
+  if (!lat || !lon || heading == null || velocity_mps == null) return [lat, lon];
+  const d = velocity_mps * interval;
   const R = 6371000;
-  const d = velocity_mps;
   const dLat = (d * Math.cos((heading * Math.PI) / 180)) / R;
   const dLon =
     (d * Math.sin((heading * Math.PI) / 180)) /
@@ -76,53 +70,70 @@ const inIndia = (lat, lon) =>
 export default function App() {
   const [planes, setPlanes] = useState([]);
   const [selectedPlane, setSelectedPlane] = useState(null);
+  const [lastUpdate, setLastUpdate] = useState(null);
   const [dark, setDark] = useState(true);
-
-  /* --- Filters --- */
-  const [minAlt, setMinAlt] = useState(0);
-  const [airOnly, setAirOnly] = useState(false);
-  const [groundOnly, setGroundOnly] = useState(false);
-  const [airline, setAirline] = useState("");
 
   /* --- Fetch planes --- */
   useEffect(() => {
+    let mounted = true;
+
     const fetchPlanes = async () => {
-      const res = await fetch("http://localhost:8000/live_planes");
-      const data = await res.json();
+      try {
+        const res = await fetch("http://localhost:8000/live_planes");
+        const data = await res.json();
+        if (!mounted) return;
 
-      if (Array.isArray(data?.planes)) {
-        const mapped = data.planes
-          .map((p, i) => ({
-            id: p.id || i,
-            callsign: p.callsign || "Unknown",
-            lat: Number(p.lat),
-            lon: Number(p.lon),
-            altitude: p.altitude ?? 0,
-            velocity_mps: normalizeVelocity(p.velocity),
-            heading: p.heading ?? 0,
-            on_ground: !!p.on_ground,
-            origin: p.origin || "—",
-            destination: p.destination || "—",
-            trail: [[Number(p.lat), Number(p.lon)]],
-          }))
-          .filter((p) => p.lat && p.lon && inIndia(p.lat, p.lon));
+        if (Array.isArray(data?.planes)) {
+          const mapped = data.planes
+            .map((p, idx) => {
+              const lat = Number(p.lat);
+              const lon = Number(p.lon);
+              return {
+                id: p.id || `plane-${idx}`,
+                callsign: p.callsign || "Unknown",
+                lat,
+                lon,
+                altitude: p.altitude ?? null,
+                velocity_mps: normalizeVelocity(p.velocity),
+                heading: p.heading ?? 0,
+                on_ground: !!p.on_ground,
+                origin: p.origin || "—",
+                destination: p.destination || "—",
+                aircraft: p.aircraft || "—",
+                trail: [[lat, lon]],
+              };
+            })
+            .filter((p) => p.lat && p.lon && inIndia(p.lat, p.lon));
 
-        setPlanes(mapped.slice(0, MAX_PLANES));
+          setPlanes(mapped.slice(0, MAX_PLANES));
+          setLastUpdate(new Date().toLocaleTimeString());
+        }
+      } catch (e) {
+        console.error("Failed to fetch planes", e);
       }
     };
 
     fetchPlanes();
     const iv = setInterval(fetchPlanes, 30000);
-    return () => clearInterval(iv);
+    return () => {
+      mounted = false;
+      clearInterval(iv);
+    };
   }, []);
 
   /* --- Animate movement --- */
   useEffect(() => {
-    const iv = setInterval(() => {
+    const anim = setInterval(() => {
       setPlanes((prev) =>
         prev.map((p) => {
           if (!p.velocity_mps) return p;
-          const [lat, lon] = movePlane(p.lat, p.lon, p.heading, p.velocity_mps);
+          const [lat, lon] = movePlane(
+            p.lat,
+            p.lon,
+            p.heading,
+            p.velocity_mps
+          );
+          if (!inIndia(lat, lon)) return p;
           return {
             ...p,
             lat,
@@ -132,75 +143,98 @@ export default function App() {
         })
       );
     }, 1000);
-    return () => clearInterval(iv);
+    return () => clearInterval(anim);
   }, []);
 
-  /* --- Apply Filters --- */
-  const filteredPlanes = useMemo(() => {
-    return planes.filter((p) => {
-      if (airOnly && p.on_ground) return false;
-      if (groundOnly && !p.on_ground) return false;
-      if (p.altitude < minAlt) return false;
-      if (airline && !p.callsign.startsWith(airline)) return false;
-      return true;
-    });
-  }, [planes, minAlt, airOnly, groundOnly, airline]);
-
+  /* --- Theme --- */
   const theme = dark
-    ? { map: "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png" }
-    : { map: "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png" };
-
-  /* --- Route Line --- */
-  const route =
-    selectedPlane &&
-    AIRPORTS[selectedPlane.origin] &&
-    AIRPORTS[selectedPlane.destination]
-      ? [
-          AIRPORTS[selectedPlane.origin],
-          AIRPORTS[selectedPlane.destination],
-        ]
-      : null;
+    ? {
+        bg: "#0b1220",
+        panel: "rgba(15,23,42,0.85)",
+        text: "#e5e7eb",
+        muted: "#9ca3af",
+        accent: "#38bdf8",
+        map:
+          "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png",
+      }
+    : {
+        bg: "#f1f5f9",
+        panel: "rgba(255,255,255,0.9)",
+        text: "#0f172a",
+        muted: "#64748b",
+        accent: "#2563eb",
+        map:
+          "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png",
+      };
 
   return (
-    <>
-      {/* Filters Panel */}
-      <div style={{ position: "absolute", left: 20, top: 90, zIndex: 1200 }}>
-        <div style={{ background: "rgba(0,0,0,0.6)", padding: 14, borderRadius: 12 }}>
-          <div>
-            <label>Min Altitude</label>
-            <input type="range" min="0" max="40000" onChange={(e) => setMinAlt(+e.target.value)} />
-          </div>
-          <div>
-            <input type="checkbox" onChange={() => setAirOnly(!airOnly)} /> In Air
-          </div>
-          <div>
-            <input type="checkbox" onChange={() => setGroundOnly(!groundOnly)} /> On Ground
-          </div>
-          <input placeholder="Airline (IGO)" onChange={(e) => setAirline(e.target.value)} />
+    <div style={{ height: "100vh", width: "100vw", background: theme.bg }}>
+      {/* Header */}
+      <header
+        style={{
+          position: "absolute",
+          top: 20,
+          left: 20,
+          right: 20,
+          zIndex: 1200,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "14px 22px",
+          borderRadius: 18,
+          backdropFilter: "blur(16px)",
+          background: theme.panel,
+          color: theme.text,
+        }}
+      >
+        <strong>✈ India Flight Radar</strong>
+        <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
+          <span>Flights: {planes.length}</span>
+          <span>Updated: {lastUpdate || "—"}</span>
+          <button
+            onClick={() => setDark(!dark)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 999,
+              border: "none",
+              background: theme.accent,
+              color: "white",
+              cursor: "pointer",
+            }}
+          >
+            {dark ? "Light" : "Dark"}
+          </button>
         </div>
-      </div>
+      </header>
 
-      <MapContainer center={[22.5, 79]} zoom={5} style={{ height: "100vh" }}>
+      {/* Map */}
+      <MapContainer center={[22.5, 79]} zoom={5} style={{ height: "100%", width: "100%" }}>
         <TileLayer url={theme.map} />
 
-        {route && (
-          <Polyline
-            positions={route}
-            pathOptions={{ color: "#facc15", dashArray: "6 6", weight: 3 }}
-          />
-        )}
+        {planes.map((p) => (
+          <React.Fragment key={p.id}>
+            {p.trail.length > 1 && (
+              <Polyline
+                positions={p.trail}
+                pathOptions={{ color: theme.accent, weight: 3, opacity: 0.7 }}
+              />
+            )}
 
-        {filteredPlanes.map((p) => (
-          <Marker
-            key={p.id}
-            position={[p.lat, p.lon]}
-            icon={createPlaneIcon(p.heading, selectedPlane?.id === p.id)}
-            eventHandlers={{ click: () => setSelectedPlane(p) }}
-          >
-            <Popup>{p.callsign}</Popup>
-          </Marker>
+            <Marker
+              position={[p.lat, p.lon]}
+              icon={createPlaneIcon(p.heading, selectedPlane?.id === p.id)}
+              eventHandlers={{ click: () => setSelectedPlane(p) }}
+            >
+              <Popup>
+                <strong>{p.callsign}</strong>
+                <div>
+                  Alt: {p.altitude ? Math.round(p.altitude) + " m" : "N/A"}
+                </div>
+              </Popup>
+            </Marker>
+          </React.Fragment>
         ))}
       </MapContainer>
-    </>
+    </div>
   );
 }
